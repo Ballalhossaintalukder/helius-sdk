@@ -7,14 +7,9 @@ import type {
   CheckoutRequest,
 } from "./types";
 import { authRequest, sleep } from "./utils";
-import { loadKeypair } from "./loadKeypair";
-import { getAddress } from "./getAddress";
-import { checkSolBalance, checkUsdcBalance } from "./checkBalances";
-import { payWithMemo } from "./payWithMemo";
 import { listProjects } from "./listProjects";
 import { getProject } from "./getProject";
 import {
-  MIN_SOL_FOR_TX,
   CHECKOUT_POLL_INTERVAL_MS,
   CHECKOUT_POLL_TIMEOUT_MS,
   PROJECT_POLL_INTERVAL_MS,
@@ -22,6 +17,7 @@ import {
   PLAN_TO_USAGE_PLAN,
 } from "./constants";
 import { fetchOpenPayPriceIds } from "./devPortalConfigs";
+import { payPaymentIntent } from "./payPaymentIntent";
 
 export async function resolvePriceId(
   jwt: string,
@@ -172,38 +168,26 @@ export async function pollCheckoutCompletion(
   };
 }
 
-export async function payPaymentIntent(
-  secretKey: Uint8Array,
-  intent: CheckoutInitializeResponse
-): Promise<string> {
-  // $0 intents are auto-completed by backend — no transaction needed
-  if (intent.amount === 0) {
-    return "";
-  }
-
-  const keypair = loadKeypair(secretKey);
-  const walletAddress = await getAddress(keypair);
-
-  const solBalance = await checkSolBalance(walletAddress);
-  if (solBalance < MIN_SOL_FOR_TX) {
-    throw new Error(
-      `Insufficient SOL for transaction fees. Have: ${Number(solBalance) / 1_000_000_000} SOL, need: ~0.001 SOL. Fund address: ${walletAddress}`
-    );
-  }
-
-  // Convert cents → USDC 6-decimal raw: 4900 cents × 10,000 = 49,000,000 raw = 49.000000 USDC
-  const amountRaw = BigInt(intent.amount) * 10_000n;
-
-  const usdcBalance = await checkUsdcBalance(walletAddress);
-  if (usdcBalance < amountRaw) {
-    throw new Error(
-      `Insufficient USDC. Have: ${Number(usdcBalance) / 1_000_000} USDC, need: ${intent.amount / 100} USDC. Fund address: ${walletAddress}`
-    );
-  }
-
-  // memo is intent.id
-  return payWithMemo(secretKey, intent.destinationWallet, amountRaw, intent.id);
+async function toCheckoutResult(
+  jwt: string,
+  intentId: string,
+  txSig: string | null,
+  userAgent?: string
+): Promise<CheckoutResult> {
+  const s = await pollCheckoutCompletion(jwt, intentId, userAgent);
+  if (s.phase === "failed" || s.phase === "expired")
+    return {
+      paymentIntentId: intentId,
+      txSignature: txSig,
+      status: s.phase,
+      error: s.message,
+    };
+  if (!s.readyToRedirect)
+    return { paymentIntentId: intentId, txSignature: txSig, status: "timeout" };
+  return { paymentIntentId: intentId, txSignature: txSig, status: "completed" };
 }
+
+export { payPaymentIntent } from "./payPaymentIntent";
 
 export async function executeCheckout(
   secretKey: Uint8Array,
@@ -212,6 +196,8 @@ export async function executeCheckout(
   userAgent?: string,
   options?: { skipProjectPolling?: boolean }
 ): Promise<CheckoutResult> {
+  const paymentMode = request.paymentMode;
+
   // 1. Resolve priceId from plan+period, then initialize checkout
   const priceId = await resolvePriceId(
     jwt,
@@ -229,14 +215,25 @@ export async function executeCheckout(
       lastName: request.lastName,
       walletAddress: request.walletAddress,
       couponCode: request.couponCode,
+      paymentMode,
+      // walletAddress identifies the payer; signupWalletAddress tells the
+      // backend to create/associate a Helius account during sponsored signup.
+      signupWalletAddress:
+        paymentMode === "sponsored" ? request.walletAddress : undefined,
     },
     userAgent
   );
 
-  // 2. Send payment (handles $0 case)
+  // 2. Send payment — pass jwt for sponsored intents; upgrades skip sponsorship.
   let txSignature: string | null = null;
   try {
-    txSignature = (await payPaymentIntent(secretKey, intent)) || null;
+    txSignature =
+      (await payPaymentIntent(
+        secretKey,
+        intent,
+        paymentMode === "sponsored" ? jwt : undefined,
+        userAgent
+      )) || null;
   } catch (error) {
     return {
       paymentIntentId: intent.id,
@@ -247,69 +244,25 @@ export async function executeCheckout(
   }
 
   // 3. Poll for payment confirmation
-  const checkoutStatus = await pollCheckoutCompletion(
-    jwt,
-    intent.id,
-    userAgent
-  );
-
-  if (checkoutStatus.phase === "failed") {
-    return {
-      paymentIntentId: intent.id,
-      txSignature,
-      status: "failed",
-      error: checkoutStatus.message,
-    };
-  }
-
-  if (checkoutStatus.phase === "expired") {
-    return {
-      paymentIntentId: intent.id,
-      txSignature,
-      status: "expired",
-      error: checkoutStatus.message,
-    };
-  }
-
-  if (!checkoutStatus.readyToRedirect) {
-    return {
-      paymentIntentId: intent.id,
-      txSignature,
-      status: "timeout",
-    };
-  }
+  const result = await toCheckoutResult(jwt, intent.id, txSignature, userAgent);
 
   // 4. Optionally poll for project creation
-  if (!options?.skipProjectPolling) {
+  if (result.status === "completed" && !options?.skipProjectPolling) {
     const projectDeadline = Date.now() + PROJECT_POLL_TIMEOUT_MS;
-    let projectId: string | undefined;
-    let apiKey: string | undefined;
 
     while (Date.now() < projectDeadline) {
       const projects = await listProjects(jwt, userAgent);
       if (projects.length > 0) {
-        projectId = projects[0].id;
-        const details = await getProject(jwt, projectId, userAgent);
-        apiKey = details.apiKeys?.[0]?.keyId;
+        result.projectId = projects[0].id;
+        const details = await getProject(jwt, result.projectId, userAgent);
+        result.apiKey = details.apiKeys?.[0]?.keyId;
         break;
       }
       await sleep(PROJECT_POLL_INTERVAL_MS);
     }
-
-    return {
-      paymentIntentId: intent.id,
-      txSignature,
-      status: "completed",
-      projectId,
-      apiKey,
-    };
   }
 
-  return {
-    paymentIntentId: intent.id,
-    txSignature,
-    status: "completed",
-  };
+  return result;
 }
 
 /** Execute a plan upgrade via OpenPay checkout.
@@ -350,29 +303,7 @@ export async function executeUpgrade(
     };
   }
 
-  const status = await pollCheckoutCompletion(jwt, intent.id, userAgent);
-
-  if (status.phase === "failed") {
-    return {
-      paymentIntentId: intent.id,
-      txSignature,
-      status: "failed",
-      error: status.message,
-    };
-  }
-  if (status.phase === "expired") {
-    return {
-      paymentIntentId: intent.id,
-      txSignature,
-      status: "expired",
-      error: status.message,
-    };
-  }
-  if (!status.readyToRedirect) {
-    return { paymentIntentId: intent.id, txSignature, status: "timeout" };
-  }
-
-  return { paymentIntentId: intent.id, txSignature, status: "completed" };
+  return toCheckoutResult(jwt, intent.id, txSignature, userAgent);
 }
 
 export async function executeRenewal(
@@ -401,27 +332,5 @@ export async function executeRenewal(
     };
   }
 
-  const status = await pollCheckoutCompletion(jwt, intent.id, userAgent);
-
-  if (status.phase === "failed") {
-    return {
-      paymentIntentId: intent.id,
-      txSignature,
-      status: "failed",
-      error: status.message,
-    };
-  }
-  if (status.phase === "expired") {
-    return {
-      paymentIntentId: intent.id,
-      txSignature,
-      status: "expired",
-      error: status.message,
-    };
-  }
-  if (!status.readyToRedirect) {
-    return { paymentIntentId: intent.id, txSignature, status: "timeout" };
-  }
-
-  return { paymentIntentId: intent.id, txSignature, status: "completed" };
+  return toCheckoutResult(jwt, intent.id, txSignature, userAgent);
 }

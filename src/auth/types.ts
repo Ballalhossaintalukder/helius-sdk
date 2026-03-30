@@ -105,8 +105,11 @@ export type CheckoutPhase =
   | "failed"
   | "expired";
 
+/** Internal — SDK always sets "sponsored" for new signups. "self_funded" kept for backend compat (upgrades, renewals). */
+export type PaymentMode = "self_funded" | "sponsored";
+
 export interface CheckoutRequest {
-  plan: string; // 'developer' | 'business' | 'professional'
+  plan: string; // 'basic' | 'developer' | 'business' | 'professional'
   period: "monthly" | "yearly";
   refId: string;
   email?: string;
@@ -114,6 +117,7 @@ export interface CheckoutRequest {
   lastName?: string;
   walletAddress?: string;
   couponCode?: string;
+  paymentMode?: PaymentMode;
 }
 
 export interface CheckoutInitializeRequest {
@@ -124,6 +128,8 @@ export interface CheckoutInitializeRequest {
   lastName?: string;
   walletAddress?: string;
   couponCode?: string;
+  paymentMode?: PaymentMode;
+  signupWalletAddress?: string;
 }
 
 export interface CheckoutInitializeResponse {
@@ -216,6 +222,32 @@ export interface AgenticSignupResult {
   txSignature?: string;
 }
 
+export interface SignupQuote {
+  plan: string;
+  period: "monthly" | "yearly";
+  baseAmountCents: number;
+  discountCents: number;
+  creditsCents: number;
+  dueTodayCents: number;
+  destinationWallet: string;
+  note: string;
+  coupon?: CheckoutPreviewCoupon | null;
+}
+
+export interface SignupFundingIntent {
+  paymentIntentId: string;
+  amountCents: number;
+  destinationWallet: string;
+  solanaPayUrl: string;
+  expiresAt: string;
+}
+
+export interface BuildSponsoredTxResponse {
+  transaction: string;
+  paymentIntentId: string;
+  lastValidBlockHeight: number;
+}
+
 export interface AuthClient {
   generateKeypair(): Promise<{ publicKey: Uint8Array; secretKey: Uint8Array }>;
   loadKeypair(bytes: Uint8Array): WalletKeypair;
@@ -269,8 +301,31 @@ export interface AuthClient {
   ): Promise<CheckoutStatusResponse>;
   payPaymentIntent(
     secretKey: Uint8Array,
-    intent: CheckoutInitializeResponse
+    intent: CheckoutInitializeResponse,
+    jwt?: string
   ): Promise<string>;
+  getSignupQuote(
+    jwt: string,
+    options: {
+      plan: string;
+      period: "monthly" | "yearly";
+      refId: string;
+      couponCode?: string;
+    }
+  ): Promise<SignupQuote>;
+  initializeSignupFunding(
+    jwt: string,
+    options: {
+      plan: string;
+      period: "monthly" | "yearly";
+      refId: string;
+      walletAddress?: string;
+      email?: string;
+      firstName?: string;
+      lastName?: string;
+      couponCode?: string;
+    }
+  ): Promise<SignupFundingIntent>;
   executeUpgrade(
     secretKey: Uint8Array,
     jwt: string,

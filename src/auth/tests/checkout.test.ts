@@ -7,6 +7,7 @@ import {
   getPaymentStatus,
   resolvePriceId,
 } from "../checkout";
+import { getSignupQuote, initializeSignupFunding } from "../signupFunding";
 import { authRequest } from "../utils";
 import { checkSolBalance, checkUsdcBalance } from "../checkBalances";
 import { payWithMemo } from "../payWithMemo";
@@ -15,6 +16,7 @@ import { getProject } from "../getProject";
 import { loadKeypair } from "../loadKeypair";
 import { getAddress } from "../getAddress";
 import { fetchOpenPayPriceIds } from "../devPortalConfigs";
+import { paySponsoredIntent } from "../sponsoredPayment";
 
 jest.mock("../utils");
 jest.mock("../checkBalances");
@@ -24,6 +26,7 @@ jest.mock("../getProject");
 jest.mock("../loadKeypair");
 jest.mock("../getAddress");
 jest.mock("../devPortalConfigs");
+jest.mock("../sponsoredPayment");
 
 // Mock polling constants to make tests fast
 jest.mock("../constants", () => ({
@@ -51,14 +54,19 @@ const mockGetAddress = getAddress as jest.MockedFunction<typeof getAddress>;
 const mockFetchOpenPayPriceIds = fetchOpenPayPriceIds as jest.MockedFunction<
   typeof fetchOpenPayPriceIds
 >;
+const mockPaySponsoredIntent = paySponsoredIntent as jest.MockedFunction<
+  typeof paySponsoredIntent
+>;
 
 const MOCK_PRICE_IDS = {
   Monthly: {
+    basic: "price_basic_monthly",
     developer_v4: "price_dev_monthly",
     business_v4: "price_biz_monthly",
     professional_v4: "price_pro_monthly",
   },
   Yearly: {
+    basic: "price_basic_yearly",
     developer_v4: "price_dev_yearly",
     business_v4: "price_biz_yearly",
     professional_v4: "price_pro_yearly",
@@ -88,6 +96,12 @@ const POLL_COMPLETED_RESPONSE = {
 describe("resolvePriceId", () => {
   beforeEach(() => jest.resetAllMocks());
 
+  it("resolves basic monthly", async () => {
+    mockFetchOpenPayPriceIds.mockResolvedValue(MOCK_PRICE_IDS);
+    const result = await resolvePriceId("jwt", "basic", "monthly");
+    expect(result).toBe("price_basic_monthly");
+  });
+
   it("resolves developer monthly", async () => {
     mockFetchOpenPayPriceIds.mockResolvedValue(MOCK_PRICE_IDS);
     const result = await resolvePriceId("jwt", "developer", "monthly");
@@ -114,7 +128,7 @@ describe("resolvePriceId", () => {
 
   it("includes available plans in error", async () => {
     await expect(resolvePriceId("jwt", "invalid", "monthly")).rejects.toThrow(
-      "Available: developer, business, professional"
+      "Available: basic, developer, business, professional"
     );
   });
 
@@ -161,6 +175,25 @@ describe("initializeCheckout", () => {
       "test-agent"
     );
     expect(result).toEqual(INIT_RESPONSE);
+  });
+
+  it("includes paymentMode in request body", async () => {
+    mockAuthRequest.mockResolvedValue(INIT_RESPONSE);
+
+    await initializeCheckout(
+      "jwt-token",
+      {
+        priceId: "price_dev_monthly",
+        refId: "ref-1",
+        paymentMode: "sponsored",
+      },
+      "test-agent"
+    );
+
+    const body = JSON.parse(
+      (mockAuthRequest.mock.calls[0][1] as RequestInit).body as string
+    );
+    expect(body.paymentMode).toBe("sponsored");
   });
 });
 
@@ -271,6 +304,10 @@ describe("executeCheckout", () => {
     mockCheckSolBalance.mockResolvedValue(10_000_000n);
     mockCheckUsdcBalance.mockResolvedValue(50_000_000n); // 50 USDC
     mockPayWithMemo.mockResolvedValue("tx-sig-abc");
+    // Sponsored payment rejects by default — triggers self-funded fallback
+    mockPaySponsoredIntent.mockRejectedValue(
+      new Error("Not a sponsored intent")
+    );
     mockListProjects.mockResolvedValue([
       { id: "proj-1", name: "Test" },
     ] as never);
@@ -309,6 +346,31 @@ describe("executeCheckout", () => {
       49_000_000n, // 4900 cents * 10_000
       "pi_test" // intent.id as memo
     );
+  });
+
+  it("passes paymentMode: sponsored through to initialize when set in request", async () => {
+    const initResponse = {
+      ...INIT_RESPONSE,
+      amount: 0,
+    };
+    mockAuthRequest.mockReset();
+    mockAuthRequest
+      .mockResolvedValueOnce(initResponse)
+      .mockResolvedValueOnce(POLL_COMPLETED_RESPONSE);
+
+    await executeCheckout(mockSecretKey, "jwt-token", {
+      plan: "developer",
+      period: "monthly",
+      refId: "ref-1",
+      paymentMode: "sponsored",
+      walletAddress: "WalletAddress111111111111111111",
+    });
+
+    // Verify paymentMode and signupWalletAddress were included in the initialize request body
+    const initCall = mockAuthRequest.mock.calls[0];
+    const body = JSON.parse((initCall[1] as RequestInit).body as string);
+    expect(body.paymentMode).toBe("sponsored");
+    expect(body.signupWalletAddress).toBe("WalletAddress111111111111111111");
   });
 
   it("returns failed on insufficient SOL", async () => {
@@ -493,5 +555,89 @@ describe("getPaymentStatus", () => {
       "agent"
     );
     expect(result.readyToRedirect).toBe(true);
+  });
+});
+
+describe("getSignupQuote", () => {
+  beforeEach(() => {
+    jest.resetAllMocks();
+    mockFetchOpenPayPriceIds.mockResolvedValue(MOCK_PRICE_IDS);
+  });
+
+  it("returns simplified quote from checkout preview", async () => {
+    mockAuthRequest.mockResolvedValue({
+      planName: "Developer",
+      period: "monthly",
+      baseAmount: 4900,
+      subtotal: 4900,
+      appliedCredits: 500,
+      proratedCredits: 200,
+      discounts: 100,
+      dueToday: 4100,
+      destinationWallet: "Treasury111",
+      note: "Prorated",
+      coupon: { code: "SAVE10", valid: true, percentOff: 10 },
+    });
+
+    const quote = await getSignupQuote("jwt", {
+      plan: "developer",
+      period: "monthly",
+      refId: "ref-1",
+      couponCode: "SAVE10",
+    });
+
+    expect(quote.plan).toBe("Developer");
+    expect(quote.period).toBe("monthly");
+    expect(quote.baseAmountCents).toBe(4900);
+    expect(quote.discountCents).toBe(100);
+    expect(quote.creditsCents).toBe(700); // appliedCredits + proratedCredits
+    expect(quote.dueTodayCents).toBe(4100);
+    expect(quote.destinationWallet).toBe("Treasury111");
+    expect(quote.note).toBe("Prorated");
+    expect(quote.coupon?.code).toBe("SAVE10");
+  });
+});
+
+describe("initializeSignupFunding", () => {
+  beforeEach(() => {
+    jest.resetAllMocks();
+    mockFetchOpenPayPriceIds.mockResolvedValue(MOCK_PRICE_IDS);
+  });
+
+  it("resolves priceId and returns funding intent with sponsored mode", async () => {
+    mockAuthRequest.mockResolvedValue(INIT_RESPONSE);
+
+    const funding = await initializeSignupFunding("jwt", {
+      plan: "developer",
+      period: "monthly",
+      refId: "ref-1",
+      email: "user@example.com",
+      firstName: "Test",
+      lastName: "User",
+    });
+
+    expect(funding.paymentIntentId).toBe("pi_test");
+    expect(funding.amountCents).toBe(4900);
+    expect(funding.destinationWallet).toBe("Treasury111");
+    expect(funding.solanaPayUrl).toBe("solana:...");
+    expect(funding.expiresAt).toBe("2026-01-01T00:00:00Z");
+
+    // Verify paymentMode is always sponsored
+    const body = JSON.parse(
+      (mockAuthRequest.mock.calls[0][1] as RequestInit).body as string
+    );
+    expect(body.paymentMode).toBe("sponsored");
+  });
+
+  it("works without optional fields", async () => {
+    mockAuthRequest.mockResolvedValue(INIT_RESPONSE);
+
+    const funding = await initializeSignupFunding("jwt", {
+      plan: "basic",
+      period: "monthly",
+      refId: "ref-1",
+    });
+
+    expect(funding.paymentIntentId).toBe("pi_test");
   });
 });

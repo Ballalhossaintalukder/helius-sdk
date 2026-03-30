@@ -21,6 +21,7 @@ import {
   executeUpgrade,
   executeRenewal,
 } from "./checkout";
+import { getSignupQuote, initializeSignupFunding } from "./signupFunding";
 import { agenticSignup } from "./agenticSignup";
 
 export function makeAuthClient(userAgent?: string): AuthClient {
@@ -47,7 +48,11 @@ export function makeAuthClient(userAgent?: string): AuthClient {
       getCheckoutPreview(jwt, plan, period, refId, coupon, userAgent),
     getPaymentIntent: (jwt, id) => getPaymentIntent(jwt, id, userAgent),
     getPaymentStatus: (jwt, id) => getPaymentStatus(jwt, id, userAgent),
-    payPaymentIntent,
+    payPaymentIntent: (sk, intent, jwt) =>
+      payPaymentIntent(sk, intent, jwt, userAgent),
+    getSignupQuote: (jwt, options) => getSignupQuote(jwt, options, userAgent),
+    initializeSignupFunding: (jwt, options) =>
+      initializeSignupFunding(jwt, options, userAgent),
     executeUpgrade: (
       sk,
       jwt,
