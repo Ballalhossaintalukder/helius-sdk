@@ -339,9 +339,9 @@ try {
 | DAS API and Enhanced API Rate Limits | 2 req/s | 10 req/s | 50 req/s | 100 req/s |
 | Sender Rate Limits | 15/s | 15/s | 15/s | 15/s |
 | Standard WebSockets Availability | ✓ | ✓ | ✓ | ✓ |
-| Helius Enhanced WebSockets Availability | No | No | ✓ | ✓ |
+| Helius Enhanced WebSockets Availability | No | ✓ | ✓ | ✓ |
 | Helius Sender Availability | ✓ | ✓ | ✓ | ✓ |
-| Helius LaserStream gRPC Availability | No | Devnet | Devnet | Devnet, Mainnet |
+| Helius LaserStream gRPC Availability (2 credits/0.1mb) | No | Devnet | Devnet + Mainnet | Devnet + Mainnet |
 | Support | Community | Chat | Priority Chat | Slack/Telegram |
 
 - When you receive a 429 error, back off and retry with exponential delay
