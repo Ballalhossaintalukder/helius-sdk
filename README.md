@@ -68,6 +68,7 @@ import { createHelius } from "helius-sdk";
 ```
 
 ### Migrating to `helius-sdk` 2.0.0
+
 The Helius Node.js SDK has been rewritten from the ground up in version 2.0.0 to use [`@solana/kit` (i.e., Kit)](https://www.npmjs.com/package/@solana/kit) under the hood, replacing the dependency on `@solana/web3.js` versions higher than 1.73.2.
 
 We've gone to great lengths to ensure that the developer experience remains largely the same, with minimal impact on existing code. The API methods and namespaces are designed to be intuitive and an improvement on previous versions, so migrating to the latest version is relatively straightforward. There are a plethora of examples found in the `examples` directory, organized by namespace, to aid in this migration.
@@ -135,7 +136,8 @@ Enhanced RPC methods, available only with Helius.
 - `getAllProgramAccounts()`: Auto-paginates through all program accounts. Use with caution on larger programs.
 - [`getTokenAccountsByOwnerV2()`](https://www.helius.dev/docs/api-reference/rpc/http/gettokenaccountsbyownerv2): An enhanced version of `getTokenAccountsByOwner` with cursor-based pagination and `changedSinceSlot` support to incrementally retrieve SPL token accounts owned by a given mint.
 - `getAllTokenAccountsByOwner()`: Auto-paginates all token accounts for a given owner.
-- [`getTransactionsForAddress()`](https://www.helius.dev/docs/rpc/gettransactionsforaddress): Get transaction history for an address with advanced filtering by slot, time, and bidirectional sorting options. Supports both signature-only and full transaction details. Optionally include transactions from associated token accounts. 
+- [`getTransactionsForAddress()`](https://www.helius.dev/docs/rpc/gettransactionsforaddress): Get transaction history for an address with advanced filtering by slot, time, and bidirectional sorting options. Supports both signature-only and full transaction details. Optionally include transactions from associated token accounts.
+- [`getTransfersByAddress()`](https://www.helius.dev/docs/rpc/gettransfersbyaddress): Get parsed token and native SOL transfer history for an address with filters by mint, time, amount, counterparty, direction, and cursor pagination.
 
 [**Staking**](https://www.helius.dev/docs/staking/how-to-stake-with-helius-programmatically)
 
