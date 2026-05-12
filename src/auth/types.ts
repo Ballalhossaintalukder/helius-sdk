@@ -113,7 +113,13 @@ export type CheckoutPhase =
   | "failed"
   | "expired";
 
-/** Internal — SDK always sets "sponsored" for new signups. "self_funded" kept for backend compat (upgrades, renewals). */
+/**
+ * Internal — Phase 1 SDK signup always sets `"self_funded"`. The
+ * `"sponsored"` variant is legacy: it's still understood by `executeCheckout`
+ * / `payPaymentIntent` (used by the deprecated `agenticSignup` path) and by
+ * the backend's `/checkout/build-sponsored-tx` route, both scheduled for
+ * removal in Phase 4.
+ */
 export type PaymentMode = "self_funded" | "sponsored";
 
 export interface CheckoutRequest {
@@ -418,13 +424,290 @@ export interface AuthClient {
     paymentIntentId: string
   ): Promise<CheckoutResult>;
   /**
-   * Buy additional prepaid credits for an agent-plan project. Agent-only
-   * in this release: pre-flight rejects non-agent projects before
-   * calling `/checkout/initialize` (see `src/auth/purchaseCredits.ts`).
+   * Phase 2 — buy additional prepaid credits for an agent-plan project.
+   * Agent-only in this release: pre-flight rejects non-agent projects.
+   * Returns a hosted-checkout `PaymentLink`; for autopay use
+   * {@link AuthClient.purchaseCreditsAndPay}.
    */
   purchaseCredits(
+    options: PurchaseCreditsLinkOptions
+  ): Promise<PurchaseCreditsLinkResult>;
+  /** Same as {@link AuthClient.purchaseCredits}, plus auto-pay + activation polling. */
+  purchaseCreditsAndPay(
+    options: PurchaseCreditsAndPayOptions
+  ): Promise<PurchaseCreditsAndPayResult>;
+  /**
+   * Phase 2 — upgrade an existing project to a new plan. Returns a
+   * hosted-checkout `PaymentLink`; for autopay use
+   * {@link AuthClient.upgradePlanAndPay}.
+   */
+  upgradePlan(options: UpgradePlanOptions): Promise<UpgradePlanResult>;
+  /** Same as {@link AuthClient.upgradePlan}, plus auto-pay + activation polling. */
+  upgradePlanAndPay(
+    options: UpgradePlanAndPayOptions
+  ): Promise<UpgradePlanAndPayResult>;
+  /**
+   * Phase 2 — wrap an existing renewal payment intent as a `PaymentLink`.
+   * The intent must already exist (created by the billing handler when a
+   * subscription renews). Use {@link AuthClient.payRenewalAndPay} to
+   * auto-pay from a local keypair.
+   */
+  payRenewal(jwt: string, paymentIntentId: string): Promise<PayRenewalResult>;
+  payRenewalAndPay(
     secretKey: Uint8Array,
     jwt: string,
-    options: PurchaseCreditsOptions
-  ): Promise<PurchaseCreditsResult>;
+    paymentIntentId: string
+  ): Promise<PayRenewalAndPayResult>;
+  /**
+   * Phase 2 — shared primitive that drives every paid flow. Exposed for
+   * advanced callers; signup / upgrade / credits / renewal-link wrap it.
+   */
+  createPayment(
+    request: import("./createPayment").CreatePaymentRequest
+  ): Promise<PaymentLink>;
+  /**
+   * Phase 1 unified signup. Authenticates the wallet, detects existing
+   * projects, and either short-circuits (`already_subscribed`) or returns
+   * a hosted-checkout link (`payment_required`). Different-plan existing
+   * projects return `upgrade_required` (use `upgradePlan` in Phase 2).
+   *
+   * Zero-amount checkouts (e.g. 100% coupons) are rejected up front.
+   */
+  signup(options: SignupOptions): Promise<SignupResult>;
+  /**
+   * Same as `signup`, but when a payment is required, sends USDC + memo
+   * from the local keypair and polls activation until the project is
+   * provisioned. On poll timeout returns `kind: "pending"` with the
+   * `txSignature` so callers can resume later.
+   */
+  signupAndPay(options: SignupAndPayOptions): Promise<SignupAndPayResult>;
+  /**
+   * Send USDC + memo for a stored {@link PaymentLink}. Wraps {@link payWithMemo}
+   * with the cents → raw conversion (USDC has 6 decimals; cents × 10_000 →
+   * raw token units) and uses `paymentLink.paymentIntentId` as the memo.
+   * Used by the CLI `--pay` resume path; does not poll.
+   */
+  payPaymentLink(
+    secretKey: Uint8Array,
+    paymentLink: PaymentLink
+  ): Promise<{ txSignature: string }>;
 }
+
+// ── Phase 1 unified signup types ─────────────────────────────────────────
+
+/** Wallet-app endpoints handed back after a successful signup. */
+export interface Endpoints {
+  mainnet: string;
+  devnet: string;
+}
+
+export type SupportedPlan = "agent" | "developer" | "business" | "professional";
+
+/**
+ * Hosted-checkout link returned to the caller. The user clicks
+ * `paymentUrl` in a browser, OR an agent sends `amountCents` (× 10_000)
+ * USDC raw to `destinationWallet` with `memo` = `paymentIntentId`.
+ */
+export interface PaymentLink {
+  kind: "payment_required";
+  paymentIntentId: string;
+  amountCents: number;
+  destinationWallet: string;
+  /** Always equal to `paymentIntentId`. */
+  memo: string;
+  expiresAt: string;
+  /** e.g. `https://dashboard.helius.dev/pay/<paymentIntentId>` */
+  paymentUrl: string;
+  /** Raw `solana:` URI for wallet apps. */
+  solanaPayUrl: string;
+  /** Display name resolved from plan/period (e.g. `"Agent Plan"`). */
+  planName: string;
+}
+
+/** Default `signup()` shape — SDK signs the auth message itself. */
+export interface SecretKeySignupOptions {
+  secretKey: Uint8Array;
+  plan: SupportedPlan;
+  /** Ignored for `plan: "agent"`. Defaults to `"monthly"` for paid subscription plans. */
+  period?: "monthly" | "yearly";
+  email?: string;
+  firstName?: string;
+  lastName?: string;
+  couponCode?: string;
+  /** Override the hosted-page host. See {@link resolvePaymentHost}. */
+  paymentHost?: string;
+}
+
+/**
+ * Advanced `signup()` shape — caller already invoked `walletSignup` and
+ * carries the resulting JWT, refId, and wallet address. Skips the internal
+ * re-authentication round trip.
+ */
+export interface PreauthenticatedSignupOptions {
+  jwt: string;
+  refId: string;
+  walletAddress: string;
+  plan: SupportedPlan;
+  period?: "monthly" | "yearly";
+  email?: string;
+  firstName?: string;
+  lastName?: string;
+  couponCode?: string;
+  paymentHost?: string;
+}
+
+export type SignupOptions =
+  | SecretKeySignupOptions
+  | PreauthenticatedSignupOptions;
+
+/**
+ * `signupAndPay()` always needs the keypair to sign the USDC transfer, so
+ * even the preauthenticated shape must carry `secretKey`.
+ */
+export type SignupAndPayOptions =
+  | SecretKeySignupOptions
+  | (PreauthenticatedSignupOptions & { secretKey: Uint8Array });
+
+export type SignupResult =
+  | {
+      kind: "payment_required";
+      jwt: string;
+      refId: string;
+      walletAddress: string;
+      paymentLink: PaymentLink;
+    }
+  | {
+      kind: "already_subscribed";
+      jwt: string;
+      refId: string;
+      walletAddress: string;
+      projectId: string;
+      apiKey: string;
+      endpoints: Endpoints;
+    }
+  | {
+      kind: "upgrade_required";
+      jwt: string;
+      refId: string;
+      walletAddress: string;
+      currentPlan: string;
+      requestedPlan: string;
+    };
+
+export type SignupAndPayResult =
+  | Extract<SignupResult, { kind: "already_subscribed" }>
+  | Extract<SignupResult, { kind: "upgrade_required" }>
+  | {
+      kind: "completed";
+      jwt: string;
+      refId: string;
+      walletAddress: string;
+      projectId: string;
+      apiKey: string;
+      endpoints: Endpoints;
+      txSignature?: string;
+      paymentIntentId?: string;
+    }
+  | {
+      kind: "pending";
+      jwt: string;
+      refId: string;
+      walletAddress: string;
+      paymentLink: PaymentLink;
+      txSignature?: string;
+    }
+  | {
+      kind: "expired";
+      jwt: string;
+      refId: string;
+      walletAddress: string;
+      paymentIntentId: string;
+    }
+  | {
+      kind: "failed";
+      jwt: string;
+      refId: string;
+      walletAddress: string;
+      paymentIntentId: string;
+      reason?: string;
+    };
+
+// ── Phase 2 — upgrade / credits / renewal-link types ──────────────────────
+
+export interface UpgradePlanOptions {
+  jwt: string;
+  /** Project UUID being upgraded. */
+  projectId: string;
+  plan: SupportedPlan;
+  period?: "monthly" | "yearly";
+  couponCode?: string;
+  /**
+   * Contact info — optional for upgrades; the backend auto-fetches from the
+   * project's existing Stripe customer. Pass them only on the first upgrade
+   * for a wallet that doesn't yet have a Stripe customer record.
+   */
+  email?: string;
+  firstName?: string;
+  lastName?: string;
+  paymentHost?: string;
+}
+
+export interface UpgradePlanAndPayOptions extends UpgradePlanOptions {
+  secretKey: Uint8Array;
+}
+
+export type UpgradePlanResult = {
+  kind: "payment_required";
+  paymentLink: PaymentLink;
+};
+
+export type UpgradePlanAndPayResult =
+  | {
+      kind: "completed";
+      txSignature?: string;
+      paymentIntentId: string;
+    }
+  | {
+      kind: "pending";
+      paymentLink: PaymentLink;
+      txSignature?: string;
+    }
+  | {
+      kind: "expired";
+      paymentIntentId: string;
+    }
+  | {
+      kind: "failed";
+      paymentIntentId: string;
+      reason?: string;
+    };
+
+export interface PurchaseCreditsLinkOptions {
+  jwt: string;
+  /** Project UUID receiving the credits. Must be on `agent_v4` in this release. */
+  projectId: string;
+  /** Quantity multiplier. Each unit = 1,000,000 credits. Defaults to 1. */
+  qty?: number;
+  couponCode?: string;
+  paymentHost?: string;
+}
+
+export interface PurchaseCreditsAndPayOptions
+  extends PurchaseCreditsLinkOptions {
+  secretKey: Uint8Array;
+}
+
+export type PurchaseCreditsLinkResult = {
+  kind: "payment_required";
+  paymentLink: PaymentLink;
+};
+
+/** Same shape as {@link UpgradePlanAndPayResult} — purchase has no project to short-circuit. */
+export type PurchaseCreditsAndPayResult = UpgradePlanAndPayResult;
+
+export type PayRenewalResult = {
+  kind: "payment_required";
+  paymentLink: PaymentLink;
+};
+
+export type PayRenewalAndPayResult = UpgradePlanAndPayResult;
