@@ -13,16 +13,10 @@ import { payUSDC } from "./payUSDC";
 import { payWithMemo } from "./payWithMemo";
 import {
   initializeCheckout,
-  executeCheckout,
   getCheckoutPreview,
   getPaymentIntent,
   getPaymentStatus,
-  payPaymentIntent,
-  executeUpgrade,
-  executeRenewal,
 } from "./checkout";
-import { getSignupQuote, initializeSignupFunding } from "./signupFunding";
-import { agenticSignup } from "./agenticSignup";
 import { purchaseCredits, purchaseCreditsAndPay } from "./purchaseCredits";
 import { upgradePlan, upgradePlanAndPay } from "./upgradePlan";
 import { payRenewal, payRenewalAndPay } from "./payRenewal";
@@ -48,39 +42,11 @@ export function makeAuthClient(userAgent?: string): AuthClient {
     checkUsdcBalance,
     payUSDC,
     initializeCheckout: (jwt, req) => initializeCheckout(jwt, req, userAgent),
-    executeCheckout: (sk, jwt, req) => executeCheckout(sk, jwt, req, userAgent),
     payWithMemo,
-    agenticSignup: (options) => agenticSignup({ ...options, userAgent }),
     getCheckoutPreview: (jwt, plan, period, refId, coupon) =>
       getCheckoutPreview(jwt, plan, period, refId, coupon, userAgent),
     getPaymentIntent: (jwt, id) => getPaymentIntent(jwt, id, userAgent),
     getPaymentStatus: (jwt, id) => getPaymentStatus(jwt, id, userAgent),
-    payPaymentIntent: (sk, intent, jwt) =>
-      payPaymentIntent(sk, intent, jwt, userAgent),
-    getSignupQuote: (jwt, options) => getSignupQuote(jwt, options, userAgent),
-    initializeSignupFunding: (jwt, options) =>
-      initializeSignupFunding(jwt, options, userAgent),
-    executeUpgrade: (
-      sk,
-      jwt,
-      plan,
-      period,
-      projectId,
-      coupon,
-      _ua,
-      customerInfo
-    ) =>
-      executeUpgrade(
-        sk,
-        jwt,
-        plan,
-        period,
-        projectId,
-        coupon,
-        userAgent,
-        customerInfo
-      ),
-    executeRenewal: (sk, jwt, id) => executeRenewal(sk, jwt, id, userAgent),
     purchaseCredits,
     purchaseCreditsAndPay,
     upgradePlan,
