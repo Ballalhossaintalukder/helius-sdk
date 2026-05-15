@@ -1,12 +1,12 @@
 import {
-  TransactionVersion,
   Address,
   TransactionSigner,
   Instruction,
   Blockhash,
   Commitment,
-  BaseTransactionMessage,
+  TransactionMessage,
   TransactionMessageWithFeePayer,
+  TransactionVersion,
   Rpc,
   SolanaRpcApi,
   signTransactionMessageWithSigners,
@@ -18,6 +18,13 @@ import {
 
 import { GetPriorityFeeEstimateFn } from "../rpc/methods/getPriorityFeeEstimate";
 import { GetComputeUnitsFn } from "./getComputeUnits";
+
+/**
+ * Mirrors `@solana/kit`'s internal `SupportedTransactionVersion` —
+ * `TransactionVersion` minus the never-shipped `1`. We can't import
+ * the kit type directly because it isn't re-exported.
+ */
+type SupportedTxVersion = Exclude<TransactionVersion, 1>;
 
 /** Options for the compute-unit simulation step. */
 export interface GetComputeUnitsOpts {
@@ -40,7 +47,7 @@ export type BlockhashLifetime = Readonly<{
 
 /** Input for building a raw transaction message. */
 export type CreateTxMessageInput = Readonly<{
-  version: TransactionVersion;
+  version: SupportedTxVersion;
   feePayer: Address | TransactionSigner<string>;
   lifetime?: BlockhashLifetime;
   instructions: readonly Instruction<string, readonly any[]>[];
@@ -59,7 +66,7 @@ export type CreateSmartTxInput = Readonly<{
   /** Optional fee-payer override (Address or TransactionSigner). */
   feePayer?: Address | TransactionSigner<string>;
   /** Tx version. Default: 0. */
-  version?: TransactionVersion;
+  version?: SupportedTxVersion;
   /** Optional cap (microlamports per CU) applied to Helius' recommendation. */
   priorityFeeCap?: number;
   /** CU floor & simulation buffer. Defaults: 1_000 / 10%. */
@@ -82,7 +89,7 @@ export type CreateSmartTxResult = Readonly<{
   /** Final blockhash + lastValidBlockHeight used for the message. */
   lifetime: BlockhashLifetime;
   /** Final message (after compute-budget ixs are prepended). */
-  message: BaseTransactionMessage & TransactionMessageWithFeePayer;
+  message: TransactionMessage & TransactionMessageWithFeePayer;
 }>;
 
 /** Internal dependencies for `createSmartTransaction`. */
