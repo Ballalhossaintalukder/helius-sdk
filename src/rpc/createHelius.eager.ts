@@ -8,6 +8,10 @@ import {
 } from "@solana/kit";
 import { wrapAutoSend } from "./wrapAutoSend";
 import { makeRpcCaller } from "./caller";
+import { resolveTransport, withSdkRequestId } from "./transport";
+
+export type { TransportHook } from "./transport";
+export type { RpcTransport } from "@solana/kit";
 import { getSDKHeaders, type AllowedRpcHeaders } from "../http";
 
 import { GetAssetFn, makeGetAsset } from "./methods/getAsset";
@@ -134,6 +138,7 @@ export const createHeliusEager = ({
   rebateAddress,
   baseUrl,
   userAgent,
+  transport: transportHook,
 }: HeliusRpcOptions): HeliusClientEager => {
   // Use custom baseUrl if provided, otherwise construct from network
   const resolvedBaseUrl = baseUrl ?? `https://${network}.helius-rpc.com/`;
@@ -151,10 +156,15 @@ export const createHeliusEager = ({
   const url = `${resolvedBaseUrl}${queryString}`;
 
   const solanaApi = createSolanaRpcApi(DEFAULT_RPC_CONFIG);
-  const transport = createDefaultRpcTransport({
-    url,
-    headers: getSDKHeaders(userAgent) as AllowedRpcHeaders,
-  });
+  const transport = resolveTransport(
+    withSdkRequestId(
+      createDefaultRpcTransport({
+        url,
+        headers: getSDKHeaders(userAgent) as AllowedRpcHeaders,
+      })
+    ),
+    transportHook
+  );
 
   let baseRpc = createRpc({ api: solanaApi, transport });
   // Cast to any because I cba to go down this type rabbit hole
